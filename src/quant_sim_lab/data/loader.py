@@ -53,14 +53,23 @@ def fetch_spy_history(
 
 def load_spy_csv(src_csv: str | Path = "data/raw/spy.csv") -> pd.DataFrame:
     """
-    Load the SPY CSV written by fetch_spy_history with strict parsing and numeric coercion.
+    Load the SPY CSV written by fetch_spy_history with strict parsing,
+    numeric coercion, and a guaranteed DatetimeIndex.
     """
     src = Path(src_csv)
     if not src.exists():
         raise FileNotFoundError(f"{src} not found. Run fetch_spy_history() first.")
 
-    # Parse first column (index) as datetime; don't let pandas guess everything
-    df = pd.read_csv(src, parse_dates=[0], index_col=0)
+    # Read without automatic date parsing; convert index ourselves to avoid warnings
+    df = pd.read_csv(src, index_col=0)
+
+    # Force DatetimeIndex (coerce any bad rows to NaT, then drop)
+    idx = pd.to_datetime(df.index, errors="coerce", utc=False)
+    bad = idx.isna()
+    if bad.any():
+        df = df.loc[~bad]
+        idx = idx[~bad]
+    df.index = idx.tz_localize(None) if getattr(idx, "tz", None) is not None else idx
 
     # Ensure expected columns exist
     expected = {"Open", "High", "Low", "Close", "Volume"}
@@ -68,12 +77,13 @@ def load_spy_csv(src_csv: str | Path = "data/raw/spy.csv") -> pd.DataFrame:
     if missing:
         raise RuntimeError(f"Missing columns in CSV: {missing}. CSV columns = {list(df.columns)}")
 
-    # Force numeric; if anything is non-numeric, coerce to NaN so we can drop it safely
+    # Force numeric dtypes
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Drop rows with NaNs in Close (should be rare)
-    df = df.dropna(subset=["Close"])
+    # Clean up and sort
+    df = df.dropna(subset=["Close"]).sort_index()
 
     return df
+
 
