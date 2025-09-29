@@ -86,4 +86,41 @@ def load_spy_csv(src_csv: str | Path = "data/raw/spy.csv") -> pd.DataFrame:
 
     return df
 
+import yfinance as yf
+import numpy as np
+
+def fetch_tbill_3m_daily(dst_csv: str | Path = "data/raw/tbill_3m.csv") -> Path:
+    """
+    Fetch 3-month T-bill yield proxy via ^IRX (13-week T-bill discount rate).
+    We convert its quoted annualized rate (percent) to a *daily simple return*:
+        daily = (1 + rate/100) ** (1/252) - 1
+    """
+    df = yf.download("^IRX", auto_adjust=False, progress=False)
+    if df.empty:
+        raise RuntimeError("Failed to download ^IRX for T-bill proxy.")
+    # Use 'Close' as the quoted percent yield
+    df = df.rename(columns=str.title)
+    out = Path(dst_csv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out)
+    return out
+
+def load_tbill_daily(src_csv: str | Path = "data/raw/tbill_3m.csv") -> pd.Series:
+    """
+    Load ^IRX CSV and return a Series of daily simple returns from the annualized percent yield.
+    """
+    p = Path(src_csv)
+    if not p.exists():
+        raise FileNotFoundError(f"{p} not found. Run fetch_tbill_3m_daily() first.")
+    df = pd.read_csv(p, index_col=0)
+    idx = pd.to_datetime(df.index, errors="coerce")
+    df.index = idx
+    df = df.sort_index().dropna(subset=["Close"])
+    # Close is annualized percent; convert to daily simple return
+    ann_rate = pd.to_numeric(df["Close"], errors="coerce").fillna(0.0) / 100.0
+    daily = (1.0 + ann_rate) ** (1/252) - 1.0
+    daily.name = "cash_daily"
+    return daily
+
+
 
