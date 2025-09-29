@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-sim-lab"
+version = "0.1.0"
+description = "Backtesting and Monte Carlo simulation framework for strategy comparison"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "yfinance>=0.2.40",
+  "scipy>=1.11"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["quant_sim_lab*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
