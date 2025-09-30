@@ -176,6 +176,7 @@ numpy>=1.24
 matplotlib>=3.7
 yfinance>=0.2.40
 scipy>=1.11
+tabulate
 """).strip() + "\n"
 
 def make_pyproject(name: str) -> str:
