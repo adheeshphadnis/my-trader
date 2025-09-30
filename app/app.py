@@ -171,19 +171,21 @@ def plot_equity_curves(curves: dict[str, pd.Series], title: str):
     for name, ser in curves.items():
         ax.plot(ser.index, ser.values, label=name)
     ax.set_title(title)
-    ax.set_ylabel("Equity (× start)")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Equity (× start)")  # unitless multiple
     ax.legend()
     st.pyplot(fig)
 
 def plot_hist(values: np.ndarray, start_value: float, actual: float | None, title: str):
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.hist(values, bins=80, alpha=0.8)
-    ax.axvline(start_value, linestyle="--", linewidth=1, label="Start")
+    ax.axvline(start_value, linestyle="--", linewidth=1, label=f"Start ({fmt_dollar(start_value)})")
     if actual is not None:
-        ax.axvline(actual, linestyle="-", linewidth=2, label=f"Actual end (${actual:,.0f})")
+        ax.axvline(actual, linestyle="-", linewidth=2, label=f"Actual end ({fmt_dollar(actual)})")
     ax.set_title(title)
-    ax.set_xlabel("Ending value ($)")
-    ax.set_ylabel("Frequency")
+    ax.set_xlabel("Ending value (USD)")
+    ax.set_ylabel("Frequency (paths)")
+    _currency_axis(ax, decimals=0)
     ax.legend()
     st.pyplot(fig)
 
@@ -195,16 +197,79 @@ def plot_cone(cone_df: pd.DataFrame, start_value: float, title: str):
         ax.fill_between(cone_df.index, cone_df["p05"], cone_df["p95"], alpha=0.15, label="5–95%")
     if "p50" in cone_df:
         ax.plot(cone_df.index, cone_df["p50"], linewidth=2, label="Median")
-    ax.axhline(start_value, linestyle="--", linewidth=1, label="Start")
+    ax.axhline(start_value, linestyle="--", linewidth=1, label=f"Start ({fmt_dollar(start_value)})")
     ax.set_title(title)
     ax.set_xlabel("Trading days from today")
-    ax.set_ylabel("Portfolio value ($)")
+    ax.set_ylabel("Portfolio value (USD)")
+    _currency_axis(ax, decimals=0)
     ax.legend()
     st.pyplot(fig)
 
 def compound_to_value(start: float, rets: pd.Series) -> float:
     r = rets.fillna(0.0).to_numpy(dtype=float)
     return float(start * np.prod(1.0 + r))
+# === Benchmark helpers ===
+def equal_weight_series(tickers: list[str]) -> pd.Series:
+    if len(tickers) == 0:
+        return pd.Series(dtype=float)
+    w = 1.0 / len(tickers)
+    return pd.Series({t: w for t in tickers})
+
+def annualize_mean_std(daily_rets: pd.Series | np.ndarray) -> tuple[float, float]:
+    r = np.asarray(daily_rets, dtype=float)
+    mu_ann = float(np.nanmean(r) * 252)
+    vol_ann = float(np.nanstd(r, ddof=0) * np.sqrt(252))
+    return mu_ann, vol_ann
+
+def capm_stats(port_rets: pd.Series, bench_rets: pd.Series) -> dict:
+    """Daily CAPM-style stats of portfolio vs benchmark; alpha annualized."""
+    # align and drop NaNs
+    df = pd.concat([port_rets, bench_rets], axis=1).dropna()
+    if df.shape[0] < 2:
+        return {"beta": np.nan, "alpha_ann": np.nan, "r2": np.nan}
+    pr = df.iloc[:, 0].to_numpy(float)
+    br = df.iloc[:, 1].to_numpy(float)
+    var_b = np.var(br)
+    if var_b == 0.0:
+        return {"beta": np.nan, "alpha_ann": np.nan, "r2": np.nan}
+    cov_pb = np.cov(pr, br, ddof=0)[0,1]
+    beta = cov_pb / var_b
+    # daily alpha = mean(port - beta*bench)
+    alpha_daily = np.mean(pr - beta * br)
+    alpha_ann = alpha_daily * 252
+    # r^2 from simple linear regression port ~ a + b*bench
+    # r = corr(pr, br); r^2:
+    r = np.corrcoef(pr, br)[0,1] if np.std(pr) > 0 and np.std(br) > 0 else np.nan
+    r2 = r*r if not np.isnan(r) else np.nan
+    return {"beta": float(beta), "alpha_ann": float(alpha_ann), "r2": float(r2)}
+
+from matplotlib.ticker import FuncFormatter, PercentFormatter
+
+# ---------- Number formatting ----------
+def fmt_pct(x, decimals=2):
+    if pd.isna(x): return ""
+    return f"{x*100:.{decimals}f}%"
+
+def fmt_pct_val(x, decimals=2):
+    """When the value is already in percent space (e.g., 12.3 for 12.3%), not as a fraction."""
+    if pd.isna(x): return ""
+    return f"{x:.{decimals}f}%"
+
+def fmt_dollar(x, decimals=0):
+    if pd.isna(x): return ""
+    return f"${x:,.{decimals}f}"
+
+def fmt_num(x, decimals=2):
+    if pd.isna(x): return ""
+    return f"{x:.{decimals}f}"
+
+# For matplotlib axes
+def _currency_axis(ax, decimals=0):
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: fmt_dollar(v, decimals)))
+
+def _percent_axis(ax, decimals=1):
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=decimals))
+
 
 # ------------------------------------------------------------
 # Sidebar — Universe, Weights, Data Window, Assumptions
@@ -275,6 +340,22 @@ st.sidebar.caption(" | ".join([f"{t}: {w:.1%}" for t, w in weights.items()]))
 # Finalize tickers for downstream code
 tickers = tuple(selected)
 
+# --- Benchmark selection ---
+st.sidebar.header("Benchmark")
+DEFAULT_BENCH_UNIVERSE = ["SPY","QQQ","VOO","IVV","DIA","IWM","TLT","IEF"]
+bench_sel = st.sidebar.multiselect(
+    "Benchmark tickers (equal-weighted)",
+    options=DEFAULT_BENCH_UNIVERSE,
+    default=["SPY"],
+    help="Pick one or more. We build an equal-weight benchmark basket."
+)
+if not bench_sel:
+    st.sidebar.warning("Select at least one benchmark (e.g., SPY).")
+    st.stop()
+bench_tickers = tuple(bench_sel)
+bench_weights = equal_weight_series(list(bench_tickers))
+
+
 # Data window (user-selected)
 st.sidebar.subheader("Data window")
 default_start = pd.to_datetime("2005-01-01").date()
@@ -315,10 +396,16 @@ split_date = st.sidebar.date_input("Split date (train ends, test begins)", pd.to
 # ------------------------------------------------------------
 with st.spinner("Loading prices & cash series..."):
     prices = load_prices(tickers, start_date, end_date)
+    bench_prices = load_prices(bench_tickers, start_date, end_date)
     cash_daily = load_cash_series()
 
+# align cash
 cash_daily = cash_daily.reindex(prices.index).ffill().fillna(0.0)
+
+# portfolio & benchmark series (both daily-rebalanced to their weights)
 portfolio_close, portfolio_rets = build_portfolio_series(prices, weights)
+bench_close, bench_rets = build_portfolio_series(bench_prices, bench_weights)
+
 
 # Warn on short windows
 if len(prices) < 60:
@@ -335,9 +422,10 @@ res_sma = run_backtest(portfolio_close, sig_sma, fee_bps=FEE_BPS, slippage_bps=S
 # ------------------------------------------------------------
 # Tabs
 # ------------------------------------------------------------
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab_bench, tab2, tab3, tab4, tab5 = st.tabs([
     "Overview",
     "Assumptions & Methodology",
+    "Benchmark",
     "Backtests (Historical)",
     "Monte Carlo — Before Tax",
     "Monte Carlo — After Tax (Annual)",
@@ -405,18 +493,173 @@ with tab2:
         """)
 
     met_df = pd.DataFrame([
-        summarize_backtest("Buy&Hold (Portfolio)", res_bh.equity, res_bh.strat_returns),
-        summarize_backtest(f"SMA{SMA_WIN}+Cash (Portfolio)", res_sma.equity, res_sma.strat_returns),
+        summarize_backtest("Buy & Hold (Portfolio)", res_bh.equity, res_bh.strat_returns),
+        summarize_backtest(f"SMA{SMA_WIN} + Cash (Portfolio)", res_sma.equity, res_sma.strat_returns),
     ])
-    st.dataframe(
-        met_df[["strategy","cagr","vol_annual","sharpe","sortino","max_drawdown","last_equity","samples"]],
-        use_container_width=True
-    )
+
+    # Rename + compute display columns
+    bt_display = pd.DataFrame({
+        "Strategy": met_df["strategy"],
+        "CAGR (%)": met_df["cagr"].apply(lambda x: fmt_pct(x, 2)),
+        "Annual Volatility (%)": met_df["vol_annual"].apply(lambda x: fmt_pct(x, 2)),
+        "Sharpe": met_df["sharpe"].apply(lambda x: fmt_num(x, 2)),
+        "Sortino": met_df["sortino"].apply(lambda x: fmt_num(x, 2)),
+        "Max Drawdown (%)": met_df["max_drawdown"].apply(lambda x: fmt_pct(x, 2)),
+        "Ending multiple (×)": met_df["last_equity"].apply(lambda x: fmt_num(x, 2)),
+        "Samples (days)": met_df["samples"].astype(int),
+    })
+
+    st.dataframe(bt_display, use_container_width=True)
+
 
     plot_equity_curves({
         "Buy&Hold (Portfolio)": res_bh.equity,
         f"SMA{SMA_WIN}+Cash (Portfolio)": res_sma.equity
     }, "Equity Curves (normalized to 1.0)")
+
+
+# -----------------------
+# Benchmark
+# -----------------------
+with tab_bench:
+    st.markdown("### Benchmark Comparison (Buy&Hold vs Your Portfolio Buy&Hold)")
+
+    with st.expander("🔎 What is this?"):
+        st.markdown(f"""
+- We construct a benchmark as an **equal-weight daily-rebalanced** basket of your selected tickers: {', '.join(bench_tickers)}.
+- We compare **Buy&Hold (Portfolio)** vs **Buy&Hold (Benchmark)** on the same date window.
+- We also compute **tracking error**, **information ratio**, and **CAPM beta/alpha** (daily model, alpha annualized).
+""")
+
+    # Buy&Hold for portfolio (already have returns via portfolio_rets)
+    # Create "always invested" strategy returns = portfolio_rets
+    # Equity (normalized to 1):
+    eq_port = (1.0 + portfolio_rets).cumprod()
+    eq_bench = (1.0 + bench_rets).cumprod()
+    eq_port.index.name = eq_bench.index.name = "Date"
+
+    # Metrics
+    port_cagr = cagr_from_series(eq_port)
+    bench_cagr = cagr_from_series(eq_bench)
+    port_vol = annualized_vol(pd.Series(portfolio_rets, index=eq_port.index))
+    bench_vol = annualized_vol(pd.Series(bench_rets, index=eq_bench.index))
+    port_sharpe = sharpe_ratio(pd.Series(portfolio_rets, index=eq_port.index))
+    bench_sharpe = sharpe_ratio(pd.Series(bench_rets, index=eq_bench.index))
+    port_sortino = sortino_ratio(pd.Series(portfolio_rets, index=eq_port.index))
+    bench_sortino = sortino_ratio(pd.Series(bench_rets, index=eq_bench.index))
+    port_mdd = max_drawdown(eq_port)
+    bench_mdd = max_drawdown(eq_bench)
+
+    # Active stats
+    active = pd.Series(portfolio_rets, index=eq_port.index) - pd.Series(bench_rets, index=eq_bench.index)
+    active_mu_ann, active_vol_ann = annualize_mean_std(active)
+    tracking_error = active_vol_ann  # by definition
+    info_ratio = (active_mu_ann / tracking_error) if tracking_error > 0 else np.nan
+
+    capm = capm_stats(pd.Series(portfolio_rets, index=eq_port.index),
+                      pd.Series(bench_rets, index=eq_bench.index))
+
+    # Table
+    bench_table = pd.DataFrame([
+        {"metric": "CAGR", "Portfolio": port_cagr, "Benchmark": bench_cagr},
+        {"metric": "Volatility (ann.)", "Portfolio": port_vol, "Benchmark": bench_vol},
+        {"metric": "Sharpe", "Portfolio": port_sharpe, "Benchmark": bench_sharpe},
+        {"metric": "Sortino", "Portfolio": port_sortino, "Benchmark": bench_sortino},
+        {"metric": "Max Drawdown", "Portfolio": port_mdd, "Benchmark": bench_mdd},
+        {"metric": "Tracking Error (ann.)", "Portfolio": tracking_error, "Benchmark": np.nan},
+        {"metric": "Information Ratio", "Portfolio": info_ratio, "Benchmark": np.nan},
+        {"metric": "Beta (vs benchmark)", "Portfolio": capm["beta"], "Benchmark": 1.0},
+        {"metric": "Alpha (annualized)", "Portfolio": capm["alpha_ann"], "Benchmark": 0.0},
+        {"metric": "R²", "Portfolio": capm["r2"], "Benchmark": 1.0},
+    ])
+    bench_disp = bench_table.copy()
+
+    def _fmt_col(metric, val):
+        if metric in ["CAGR", "Volatility (ann.)", "Max Drawdown"]:
+            return fmt_pct(val, 2)
+        if metric in ["Sharpe", "Sortino", "Information Ratio", "Beta (vs benchmark)", "R²"]:
+            return fmt_num(val, 2)
+        if metric in ["Tracking Error (ann.)"]:
+            return fmt_pct(val, 2)
+        if metric in ["Alpha (annualized)"]:
+            return fmt_pct(val, 2)  # alpha_ann is in fraction/year; show as %
+        return val
+
+    for col in ["Portfolio", "Benchmark"]:
+        bench_disp[col] = [
+            _fmt_col(m, v) for m, v in zip(bench_disp["metric"], bench_disp[col])
+        ]
+
+    # Rename columns for clarity
+    bench_disp = bench_disp.rename(columns={
+        "metric": "Metric",
+        "Portfolio": "Your portfolio (BH)",
+        "Benchmark": "Benchmark (BH)"
+    })
+    st.dataframe(bench_disp, use_container_width=True)
+
+
+    # Glossary for metrics
+    METRIC_EXPLAIN = {
+        "CAGR": "Compound Annual Growth Rate: the steady yearly % return that gets you from start to finish.",
+        "Volatility (ann.)": "How bumpy the ride is, scaled to yearly terms.",
+        "Sharpe": "Return per unit of total volatility (risk-adjusted return).",
+        "Sortino": "Return per unit of downside volatility (ignores upside bumps).",
+        "Max Drawdown": "Worst peak-to-trough loss (historical pain point).",
+        "Tracking Error (ann.)": "How much your portfolio’s returns deviate from the benchmark (annualized).",
+        "Information Ratio": "Excess return vs benchmark divided by tracking error.",
+        "Beta (vs benchmark)": "How sensitive your portfolio is to moves in the benchmark (1.2 = moves 20% more).",
+        "Alpha (annualized)": "Average extra return not explained by beta, annualized.",
+        "R²": "How well the benchmark explains your portfolio’s returns (1.0 = perfectly explained)."
+    }
+    # After showing st.dataframe(bench_table, ...)
+    st.markdown("### Glossary")
+    for metric, expl in METRIC_EXPLAIN.items():
+        st.markdown(f"**{metric}** — {expl}")
+
+
+    # Plots
+    col1, col2 = st.columns(2)
+    with col1:
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(eq_port.index, eq_port.values, label="Portfolio (BH)")
+        ax.plot(eq_bench.index, eq_bench.values, label="Benchmark (BH)")
+        ax.set_title("Equity Curves — Buy&Hold")
+        ax.set_ylabel("Growth (× start)")
+        ax.legend()
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Growth (× start)")
+        st.pyplot(fig)
+
+    with col2:
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(active.index, (1.0 + active).cumprod() - 1.0)
+        ax.axhline(0.0, linestyle="--", linewidth=1)
+        ax.set_title("Cumulative Active Return (Portfolio − Benchmark)")
+        ax.set_ylabel("Active return")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Cumulative active return (%)")
+        _percent_axis(ax, decimals=1)  # after plotting line (which is in fraction space)
+        st.pyplot(fig)
+
+    # Optional: rolling stats
+    show_roll = st.checkbox("Show rolling 252d tracking error & active return", value=False)
+    if show_roll and len(active) > 252:
+        roll_te = active.rolling(252).std() * np.sqrt(252)
+        roll_active_ann = active.rolling(252).mean() * 252
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(roll_te.index, roll_te.values)
+        ax.set_title("Rolling 252d Tracking Error (annualized)")
+        st.pyplot(fig)
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(roll_active_ann.index, roll_active_ann.values)
+        ax.axhline(0.0, linestyle="--", linewidth=1)
+        ax.set_title("Rolling 252d Active Return (annualized)")
+        _percent_axis(ax)
+        st.pyplot(fig)
+
 
 # -----------------------
 # Monte Carlo — Before Tax
@@ -443,10 +686,29 @@ with tab3:
     sum_bh  = summarize_mc(endings_bh, START_VALUE)
     sum_sma = summarize_mc(endings_sma, START_VALUE)
 
-    st.dataframe(pd.DataFrame([
-        {"strategy":"Buy&Hold (Portfolio)", **sum_bh},
-        {"strategy":f"SMA{SMA_WIN}+Cash (Portfolio)", **sum_sma},
-    ]), use_container_width=True)
+    def mc_to_display(name, s):
+        return {
+            "Strategy": name,
+            "Start ($)": fmt_dollar(s["start_value"]),
+            "Mean end ($)": fmt_dollar(s["mean_end"]),
+            "Median end ($)": fmt_dollar(s["median_end"]),
+            "5th pct ($)": fmt_dollar(s["p05_end"]),
+            "25th pct ($)": fmt_dollar(s["p25_end"]),
+            "75th pct ($)": fmt_dollar(s["p75_end"]),
+            "95th pct ($)": fmt_dollar(s["p95_end"]),
+            "Prob end < start": fmt_pct(s["prob_end_below_start"], 1),
+            "Min end ($)": fmt_dollar(s["min_end"]),
+            "Max end ($)": fmt_dollar(s["max_end"]),
+            "Paths": int(s["num_paths"]),
+        }
+
+    mc_display = pd.DataFrame([
+        mc_to_display("Buy & Hold (Portfolio)", sum_bh),
+        mc_to_display(f"SMA{SMA_WIN} + Cash (Portfolio)", sum_sma),
+    ])
+
+    st.dataframe(mc_display, use_container_width=True)
+
 
     colA, colB = st.columns(2)
     with colA:
@@ -482,13 +744,32 @@ with tab4:
         eq_sma = apply_annual_tax_to_path(r_sma[i], dates, START_VALUE, st_stcg)
         end_bh_at[i], end_sma_at[i] = eq_bh[-1], eq_sma[-1]
 
-    sum_bh_at  = summarize_mc(end_bh_at, START_VALUE)
-    sum_sma_at = summarize_mc(end_sma_at, START_VALUE)
+    sum_bh  = summarize_mc(endings_bh, START_VALUE)
+    sum_sma = summarize_mc(endings_sma, START_VALUE)
 
-    st.dataframe(pd.DataFrame([
-        {"strategy":"Buy&Hold (after-tax)", **sum_bh_at},
-        {"strategy":f"SMA{SMA_WIN}+Cash (after-tax)", **sum_sma_at},
-    ]), use_container_width=True)
+    def mc_to_display(name, s):
+        return {
+            "Strategy": name,
+            "Start ($)": fmt_dollar(s["start_value"]),
+            "Mean end ($)": fmt_dollar(s["mean_end"]),
+            "Median end ($)": fmt_dollar(s["median_end"]),
+            "5th pct ($)": fmt_dollar(s["p05_end"]),
+            "25th pct ($)": fmt_dollar(s["p25_end"]),
+            "75th pct ($)": fmt_dollar(s["p75_end"]),
+            "95th pct ($)": fmt_dollar(s["p95_end"]),
+            "Prob end < start": fmt_pct(s["prob_end_below_start"], 1),
+            "Min end ($)": fmt_dollar(s["min_end"]),
+            "Max end ($)": fmt_dollar(s["max_end"]),
+            "Paths": int(s["num_paths"]),
+        }
+
+    mc_display = pd.DataFrame([
+        mc_to_display("Buy & Hold (Portfolio)", sum_bh),
+        mc_to_display(f"SMA{SMA_WIN} + Cash (Portfolio)", sum_sma),
+    ])
+
+    st.dataframe(mc_display, use_container_width=True)
+
 
     colA, colB = st.columns(2)
     with colA:
@@ -547,26 +828,26 @@ with tab5:
         pct_bh  = float(np.mean(mc_bh.ending_values  <= actual_bh))
         pct_sma = float(np.mean(mc_sma.ending_values <= actual_sma))
 
-        st.dataframe(pd.DataFrame([
-            {"strategy":"Buy&Hold (Portfolio)",
-             "train": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
-             "test":  f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
-             "actual_end": actual_bh,
-             "mc_median_end": s_bh["median_end"],
-             "mc_p05_end": s_bh["p05_end"],
-             "mc_p95_end": s_bh["p95_end"],
-             "actual_percentile_in_MC": pct_bh},
-            {"strategy":f"SMA{SMA_WIN}+Cash (Portfolio)",
-             "train": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
-             "test":  f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
-             "actual_end": actual_sma,
-             "mc_median_end": s_sma["median_end"],
-             "mc_p05_end": s_sma["p05_end"],
-             "mc_p95_end": s_sma["p95_end"],
-             "actual_percentile_in_MC": pct_sma},
-        ]), use_container_width=True)
+        pred_disp = pd.DataFrame([
+            {"Strategy": "Buy & Hold (Portfolio)",
+            "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
+            "Test window": f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
+            "Actual end ($)": fmt_dollar(actual_bh),
+            "MC median end ($)": fmt_dollar(s_bh["median_end"]),
+            "MC 5th pct ($)": fmt_dollar(s_bh["p05_end"]),
+            "MC 95th pct ($)": fmt_dollar(s_bh["p95_end"]),
+            "Actual percentile in MC": fmt_pct_val(np.mean(mc_bh.ending_values <= actual_bh)*100, 1)},
+            {"Strategy": f"SMA{SMA_WIN} + Cash (Portfolio)",
+            "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
+            "Test window": f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
+            "Actual end ($)": fmt_dollar(actual_sma),
+            "MC median end ($)": fmt_dollar(s_sma["median_end"]),
+            "MC 5th pct ($)": fmt_dollar(s_sma["p05_end"]),
+            "MC 95th pct ($)": fmt_dollar(s_sma["p95_end"]),
+            "Actual percentile in MC": fmt_pct_val(np.mean(mc_sma.ending_values <= actual_sma)*100, 1)},
+        ])
+        st.dataframe(pred_disp, use_container_width=True)
 
-        st.markdown("**Distributions vs Actual**")
         colA, colB = st.columns(2)
         with colA:
             plot_hist(mc_bh.ending_values, START_VALUE, actual_bh, "Buy&Hold — Simulated Test Endings vs Actual")
