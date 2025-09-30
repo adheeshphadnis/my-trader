@@ -274,6 +274,7 @@ def _percent_axis(ax, decimals=1):
 # ------------------------------------------------------------
 # Sidebar — Universe, Weights, Data Window, Assumptions
 # ------------------------------------------------------------
+# --- Universe & Portfolio: Ticker selection with custom additions ---
 st.sidebar.header("Universe & Portfolio")
 
 DEFAULT_UNIVERSE = [
@@ -282,31 +283,44 @@ DEFAULT_UNIVERSE = [
     "BRK-B","UNH","XOM","JPM","V","MA","HD","PG"
 ]
 
-# Persist selection across reruns
+# Persist selection
 if "selected_tickers" not in st.session_state:
     st.session_state.selected_tickers = ["SPY"]
 
+# Build dynamic options = default universe U previously selected
+dynamic_options = sorted(set(DEFAULT_UNIVERSE) | set(st.session_state.selected_tickers))
+
+# Multiselect with safe default (intersection)
+safe_default = [t for t in st.session_state.selected_tickers if t in dynamic_options]
 selected = st.sidebar.multiselect(
     "Select tickers",
-    options=DEFAULT_UNIVERSE,
-    default=st.session_state.selected_tickers,
+    options=dynamic_options,
+    default=safe_default,
     help="Type to search, use checkboxes to add/remove.",
 )
 
+# Add custom ticker box
 st.sidebar.caption("Don’t see your ticker? Add it below ⤵")
 c1, c2 = st.sidebar.columns([2,1])
 with c1:
-    custom_symbol = st.text_input("Add custom ticker", value="", label_visibility="collapsed", placeholder="e.g., TLT or ^GSPC")
+    custom_symbol = st.text_input("Add custom ticker", value="", label_visibility="collapsed", placeholder="e.g., TLT or JOBY")
 with c2:
     if st.button("Add"):
-        sym = custom_symbol.strip().upper()
-        if sym and sym not in selected:
-            selected = selected + [sym]
-        st.session_state.selected_tickers = selected
-        st.experimental_rerun()
+        sym = (custom_symbol or "").strip().upper()
+        if sym:
+            # update session selection and options
+            if sym not in st.session_state.selected_tickers:
+                st.session_state.selected_tickers.append(sym)
+            # force re-run so multiselect options include the new symbol
+            if hasattr(st, "rerun"):
+                st.rerun()
+            else:
+                st.experimental_rerun()
 
-# Persist latest selection
+# Persist final selection from multiselect
 st.session_state.selected_tickers = selected
+
+# Guard: need at least one
 if not selected:
     st.sidebar.warning("Please select at least one ticker (e.g., SPY).")
     st.stop()
