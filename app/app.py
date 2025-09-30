@@ -833,14 +833,22 @@ with tab5:
         actual_bh  = compound_to_value(START_VALUE, res_bh_te.strat_returns)
         actual_sma = compound_to_value(START_VALUE, res_sma_te.strat_returns)
 
+        # Horizon = length of TEST returns
         horizon = len(res_bh_te.strat_returns)
-        mc_bh  = simulate_iid(res_bh_tr.strat_returns,  horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+21)
-        mc_sma = simulate_iid(res_sma_tr.strat_returns, horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+22)
 
-        s_bh  = summarize_mc(mc_bh.ending_values, START_VALUE)
-        s_sma = summarize_mc(mc_sma.ending_values, START_VALUE)
-        pct_bh  = float(np.mean(mc_bh.ending_values  <= actual_bh))
-        pct_sma = float(np.mean(mc_sma.ending_values <= actual_sma))
+        if BOOT_KIND == "IID":
+            mc_bh  = simulate_iid(res_bh_tr.strat_returns,  horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+21)
+            mc_sma = simulate_iid(res_sma_tr.strat_returns, horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+22)
+            endings_bh, endings_sma = mc_bh.ending_values, mc_sma.ending_values
+        else:
+            paths_bh  = simulate_block_paths(res_bh_tr.strat_returns,  horizon, n_paths=N_PATHS, start_value=START_VALUE, block_size=BLOCK_SIZE, seed=SEED+21)
+            paths_sma = simulate_block_paths(res_sma_tr.strat_returns, horizon, n_paths=N_PATHS, start_value=START_VALUE, block_size=BLOCK_SIZE, seed=SEED+22)
+            endings_bh, endings_sma = paths_bh[:, -1], paths_sma[:, -1]
+
+        s_bh  = summarize_mc(endings_bh, START_VALUE)
+        s_sma = summarize_mc(endings_sma, START_VALUE)
+        pct_bh  = float(np.mean(endings_bh  <= actual_bh))
+        pct_sma = float(np.mean(endings_sma <= actual_sma))
 
         pred_disp = pd.DataFrame([
             {"Strategy": "Buy & Hold (Portfolio)",
