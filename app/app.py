@@ -808,7 +808,7 @@ with tab5:
     with st.expander("🔎 What are we testing here?"):
         st.markdown("""
 - We split the data into **TRAIN** (before the split date) and **TEST** (after).
-- Using TRAIN strategy returns, we simulate the TEST horizon to get a distribution.
+- Using TRAIN strategy returns, we simulate the TEST horizon (IID or Block bootstrap).
 - Then we see where the **actual TEST ending** lands within that distribution.
 - If the model is reasonable, actual outcomes should land inside the 5–95% band most of the time.
         """)
@@ -820,22 +820,24 @@ with tab5:
     if mask_tr.sum() < 252 or mask_te.sum() < 252:
         st.warning("Need ≥ 1 year in both TRAIN and TEST. Adjust split date or select tickers with longer histories.")
     else:
+        # Train/Test splits for price index, signals, and cash
         close_tr, close_te = portfolio_close[mask_tr], portfolio_close[mask_te]
         sig_bh_tr,  sig_bh_te  = sig_bh[mask_tr],  sig_bh[mask_te]
         sig_sma_tr, sig_sma_te = sig_sma[mask_tr], sig_sma[mask_te]
         cash_tr,    cash_te    = cash_daily[mask_tr], cash_daily[mask_te]
 
+        # Backtests on TRAIN and TEST windows
         res_bh_tr  = run_backtest(close_tr, sig_bh_tr, fee_bps=0.0,   slippage_bps=0.0,   cash_daily=0.0)
         res_bh_te  = run_backtest(close_te, sig_bh_te, fee_bps=0.0,   slippage_bps=0.0,   cash_daily=0.0)
         res_sma_tr = run_backtest(close_tr, sig_sma_tr, fee_bps=FEE_BPS, slippage_bps=SLIP_BPS, cash_daily=cash_tr)
         res_sma_te = run_backtest(close_te, sig_sma_te, fee_bps=FEE_BPS, slippage_bps=SLIP_BPS, cash_daily=cash_te)
 
+        # Actual test-window ending values from compounding test returns
         actual_bh  = compound_to_value(START_VALUE, res_bh_te.strat_returns)
         actual_sma = compound_to_value(START_VALUE, res_sma_te.strat_returns)
 
-        # Horizon = length of TEST returns
+        # Simulate TEST horizon using TRAIN returns (respect IID/Block choice)
         horizon = len(res_bh_te.strat_returns)
-
         if BOOT_KIND == "IID":
             mc_bh  = simulate_iid(res_bh_tr.strat_returns,  horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+21)
             mc_sma = simulate_iid(res_sma_tr.strat_returns, horizon, n_paths=N_PATHS, start_value=START_VALUE, seed=SEED+22)
@@ -845,33 +847,37 @@ with tab5:
             paths_sma = simulate_block_paths(res_sma_tr.strat_returns, horizon, n_paths=N_PATHS, start_value=START_VALUE, block_size=BLOCK_SIZE, seed=SEED+22)
             endings_bh, endings_sma = paths_bh[:, -1], paths_sma[:, -1]
 
+        # Summaries and where actual lands within the MC distribution
         s_bh  = summarize_mc(endings_bh, START_VALUE)
         s_sma = summarize_mc(endings_sma, START_VALUE)
-        pct_bh  = float(np.mean(endings_bh  <= actual_bh))
-        pct_sma = float(np.mean(endings_sma <= actual_sma))
+        pct_bh  = float(np.mean(endings_bh  <= actual_bh))   # fraction 0..1
+        pct_sma = float(np.mean(endings_sma <= actual_sma))  # fraction 0..1
 
+        # Display table (clean labels; $ and % formatting)
         pred_disp = pd.DataFrame([
             {"Strategy": "Buy & Hold (Portfolio)",
-            "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
-            "Test window": f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
-            "Actual end ($)": fmt_dollar(actual_bh),
-            "MC median end ($)": fmt_dollar(s_bh["median_end"]),
-            "MC 5th pct ($)": fmt_dollar(s_bh["p05_end"]),
-            "MC 95th pct ($)": fmt_dollar(s_bh["p95_end"]),
-            "Actual percentile in MC": fmt_pct_val(np.mean(mc_bh.ending_values <= actual_bh)*100, 1)},
+             "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
+             "Test window":  f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
+             "Actual end ($)":        fmt_dollar(actual_bh),
+             "MC median end ($)":     fmt_dollar(s_bh["median_end"]),
+             "MC 5th pct ($)":        fmt_dollar(s_bh["p05_end"]),
+             "MC 95th pct ($)":       fmt_dollar(s_bh["p95_end"]),
+             "Actual percentile in MC": fmt_pct_val(pct_bh * 100, 1)},
             {"Strategy": f"SMA{SMA_WIN} + Cash (Portfolio)",
-            "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
-            "Test window": f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
-            "Actual end ($)": fmt_dollar(actual_sma),
-            "MC median end ($)": fmt_dollar(s_sma["median_end"]),
-            "MC 5th pct ($)": fmt_dollar(s_sma["p05_end"]),
-            "MC 95th pct ($)": fmt_dollar(s_sma["p95_end"]),
-            "Actual percentile in MC": fmt_pct_val(np.mean(mc_sma.ending_values <= actual_sma)*100, 1)},
+             "Train window": f"{close_tr.index[0].date()} → {close_tr.index[-1].date()}",
+             "Test window":  f"{close_te.index[0].date()} → {close_te.index[-1].date()}",
+             "Actual end ($)":        fmt_dollar(actual_sma),
+             "MC median end ($)":     fmt_dollar(s_sma["median_end"]),
+             "MC 5th pct ($)":        fmt_dollar(s_sma["p05_end"]),
+             "MC 95th pct ($)":       fmt_dollar(s_sma["p95_end"]),
+             "Actual percentile in MC": fmt_pct_val(pct_sma * 100, 1)},
         ])
         st.dataframe(pred_disp, use_container_width=True)
 
+        st.markdown("**Distributions vs Actual**")
         colA, colB = st.columns(2)
         with colA:
-            plot_hist(mc_bh.ending_values, START_VALUE, actual_bh, "Buy&Hold — Simulated Test Endings vs Actual")
+            plot_hist(endings_bh, START_VALUE, actual_bh, "Buy & Hold — Simulated Test Endings vs Actual")
         with colB:
-            plot_hist(mc_sma.ending_values, START_VALUE, actual_sma, f"SMA{SMA_WIN}+Cash — Simulated Test Endings vs Actual")
+            plot_hist(endings_sma, START_VALUE, actual_sma, f"SMA{SMA_WIN} + Cash — Simulated Test Endings vs Actual")
+
